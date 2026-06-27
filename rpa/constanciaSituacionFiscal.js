@@ -56,7 +56,7 @@ module.exports = async (args) => {
 
       console.log('Esperar a formulario activo...');
 
-      await page.waitForSelector('iframe', { timeout: 15000 });
+      await page.waitForSelector('iframe', { timeout: Number(process.env.SAT_IFRAME_TIMEOUT_MS) || 45000 });
       const iframeElement = await page.$('iframe');
 
       // Switch to the context of the iframe
