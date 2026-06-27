@@ -60,6 +60,17 @@ module.exports = async (args) => {
     try {
       console.log('Esperando respuesta de página...');
       const mainPage = await getBrowserPage(url, browser, settings);
+
+      // Esperar a que el enlace de descarga ("actionButton") esté en el DOM antes
+      // de leer su href. La página del SAT a veces renderiza lento y el botón se
+      // inyecta de forma dinámica; leer demasiado pronto devolvía '' → el error
+      // espurio "Url no encontrada". SIN try/catch local: si el elemento de verdad
+      // no aparece (página cambiada / bloqueada), el TimeoutError sube al catch
+      // externo y se reporta como un "Waiting for selector `.actionButton` failed:
+      // …ms exceeded" real y diagnosticable, en vez de enmascararse. Ajustable con
+      // SAT_ACTIONBUTTON_TIMEOUT_MS (default 45000).
+      await mainPage.waitForSelector('.actionButton', { timeout: Number(process.env.SAT_ACTIONBUTTON_TIMEOUT_MS) || 45000 });
+
       const href = await mainPage.evaluate(() => {
         try {
           return document.getElementsByClassName('actionButton')[0].href;
@@ -110,7 +121,7 @@ module.exports = async (args) => {
             await page.type('#userCaptcha', captchaText);
           }
         } else if (loginMethod === 'efirma') {
-          
+
           console.log('Subir archivos cer y key al formulario...');
           await uploadFile(page, '#fileCertificate', filePathCer);
           await uploadFile(page, '#filePrivateKey', filePathKey);
@@ -126,8 +137,11 @@ module.exports = async (args) => {
           console.log('Submit al formulario...');
           await page.click('#submit');
 
+          // Mismo timeout ajustable que el iframe de arriba: tras el submit la
+          // página de resultado (con el PDF en un iframe) también puede tardar si
+          // el SAT va lento; el default 30s de Puppeteer se quedaba corto.
           console.log('Esperando al formulario...');
-          await page.waitForSelector('iframe');
+          await page.waitForSelector('iframe', { timeout: Number(process.env.SAT_IFRAME_TIMEOUT_MS) || 45000 });
 
           console.log('Obteniendo base64 de PDF...');
           pdf = await page.evaluate(() => {
