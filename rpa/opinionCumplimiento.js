@@ -74,7 +74,7 @@ module.exports = async (args) => {
         const page = await getBrowserPage(href, browser, settings);
 
         console.log('Esperar a formulario activo...');
-        await page.waitForSelector('#btnCertificate', { timeout: 15000 });
+      await page.waitForSelector('iframe', { timeout: Number(process.env.SAT_IFRAME_TIMEOUT_MS) || 45000 });
 
         console.log(`Accediendo mediante ${loginMethod}...`);
 
