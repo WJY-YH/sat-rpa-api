@@ -16,6 +16,8 @@ module.exports = async (args) => {
   const password = to.string(args?.password);
   const base64Cer = to.string(args?.base64Cer);
   const base64Key = to.string(args?.base64Key);
+  let filePathCer = '';
+  let filePathKey = '';
 
   if (password !== '') {
     if (rfc !== '') {
@@ -29,11 +31,11 @@ module.exports = async (args) => {
       const fileName = new Date().toISOString().replace(/[:.-]/g, '');
 
       // Upload CER
-      const filePathCer = `./${fileName}.cer`;
+      filePathCer = `./${fileName}.cer`;
       const isSavedCer = await saveBase64File(base64Cer, filePathCer);
 
       // Upload KEY
-      const filePathKey = `./${fileName}.key`;
+      filePathKey = `./${fileName}.key`;
       const isSavedKey = await saveBase64File(base64Key, filePathKey);
       validData = isSavedCer && isSavedKey;
     }
