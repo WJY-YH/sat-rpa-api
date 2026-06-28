@@ -2,7 +2,14 @@ const { is, to, getBrowserPage, saveBase64File, uploadFile, removeFile, opinionC
 const { processCaptcha } = require('../captcha/captcha');
 
 module.exports = async (args) => {
-  const url = 'https://www.sat.gob.mx/consultas/20777/consulta-tu-opinion-de-cumplimiento-de-obligaciones-fiscales';
+  // ANTES: se abría la página de aterrizaje /consultas/20777/... y se raspaba el
+  // href del botón ".actionButton" para abrir el login. El SAT cambió esa página
+  // y el botón ya no existe → "Url no encontrada" / "waiting for `.actionButton`
+  // ... 45000ms exceeded". AHORA vamos DIRECTO a la URL de login (el segmento
+  // /login/), que es justo a donde apuntaba el actionButton. El FORMULARIO de
+  // login de la Opinión está en la PÁGINA (no dentro de un iframe, a diferencia de
+  // la Constancia); el iframe sólo aparece DESPUÉS del submit con el PDF.
+  const url = 'https://www.sat.gob.mx/consultas/login/20777/consulta-tu-opinion-de-cumplimiento-de-obligaciones-fiscales';
   console.log(url);
 
   let pdf = '';
@@ -30,11 +37,9 @@ module.exports = async (args) => {
 
       const fileName = new Date().toISOString().replace(/[:.-]/g, '');
 
-      // Upload CER
       filePathCer = `./${fileName}.cer`;
       const isSavedCer = await saveBase64File(base64Cer, filePathCer);
 
-      // Upload KEY
       filePathKey = `./${fileName}.key`;
       const isSavedKey = await saveBase64File(base64Key, filePathKey);
       validData = isSavedCer && isSavedKey;
@@ -57,117 +62,133 @@ module.exports = async (args) => {
       defaultViewport: null,
     });
 
+    let page = null;
     try {
-      console.log('Esperando respuesta de página...');
-      const mainPage = await getBrowserPage(url, browser, settings);
+      console.log(`Abriendo página ${url} ...`);
+      page = await getBrowserPage(url, browser, settings);
 
-      // Esperar a que el enlace de descarga ("actionButton") esté en el DOM antes
-      // de leer su href. La página del SAT a veces renderiza lento y el botón se
-      // inyecta de forma dinámica; leer demasiado pronto devolvía '' → el error
-      // espurio "Url no encontrada". SIN try/catch local: si el elemento de verdad
-      // no aparece (página cambiada / bloqueada), el TimeoutError sube al catch
-      // externo y se reporta como un "Waiting for selector `.actionButton` failed:
-      // …ms exceeded" real y diagnosticable, en vez de enmascararse. Ajustable con
-      // SAT_ACTIONBUTTON_TIMEOUT_MS (default 45000).
-      await mainPage.waitForSelector('.actionButton', { timeout: Number(process.env.SAT_ACTIONBUTTON_TIMEOUT_MS) || 45000 });
+      // El formulario de login de la Opinión está en la PÁGINA (no en iframe).
+      // Esperamos el control del método elegido: e.firma (#btnCertificate, igual
+      // que el RPA canónico de AguilarT1995) o contraseña (#contrasena). Timeout
+      // ajustable (antes se esperaba 'iframe', que era incorrecto para Opinión).
+      const waitSel = loginMethod === 'efirma' ? '#btnCertificate' : '#contrasena';
+      console.log(`Esperar a formulario activo (${waitSel})...`);
+      await page.waitForSelector(waitSel, { timeout: Number(process.env.SAT_IFRAME_TIMEOUT_MS) || 45000 });
 
-      const href = await mainPage.evaluate(() => {
-        try {
-          return document.getElementsByClassName('actionButton')[0].href;
-        } catch (e) {
-          return '';
-        }
-      });
+      console.log(`Accediendo mediante ${loginMethod}...`);
 
-      if (href === '') message = 'Url no encontrada';
-      else {
-        console.log(`Abriendo página ${href} ...`);
-        const page = await getBrowserPage(href, browser, settings);
+      let isFormValid = false;
 
-        console.log('Esperar a formulario activo...');
-      await page.waitForSelector('iframe', { timeout: Number(process.env.SAT_IFRAME_TIMEOUT_MS) || 45000 });
+      if (loginMethod === 'password') {
+        console.log('Dar click en botón contraseña...');
+        await page.click('#contrasena');
 
-        console.log(`Accediendo mediante ${loginMethod}...`);
+        console.log('Esperando captcha...');
+        await page.waitForSelector('#divCaptcha img');
 
-        let isFormValid = false;
+        console.log('Escribir rfc...');
+        await page.waitForSelector('#rfc', { visible: true });
+        await page.type('#rfc', rfc);
 
-        if (loginMethod === 'password') {
-          console.log('Dar click en botón contraseña...');
-          await page.click('#contrasena');
+        console.log('Escribir contraseña...');
+        await page.waitForSelector('#password', { visible: true });
+        await page.type('#password', password);
 
-          console.log('Esperando captcha...');
-          await page.waitForSelector('#divCaptcha img');
+        console.log('Obtener imagen de captcha...');
+        const base64 = await page.$eval('#divCaptcha img', (img) => img.src);
 
-          console.log('Escribir rfc...');
-          await page.waitForSelector('#rfc', { visible: true });
-          await page.type('#rfc', rfc);
+        console.log('Resolver captcha...');
+        const captcha = await processCaptcha(base64);
+        console.log(captcha);
 
-          console.log('Escribir contraseña...');
-          await page.waitForSelector('#password', { visible: true });
-          await page.type('#password', password);
-
-          console.log('Obtener imagen de captcha...');
-          const base64 = await page.$eval('#divCaptcha img', (img) => img.src);
-
-          console.log('Resolver captcha...');
-          const captcha = await processCaptcha(base64);
-          console.log(captcha);
-
-          captchaText = captcha.text;
-          isFormValid = captcha.isValid;
-
-          if (isFormValid) {
-            await page.waitForSelector('#userCaptcha', { visible: true });
-            await page.type('#userCaptcha', captchaText);
-          }
-        } else if (loginMethod === 'efirma') {
-
-          console.log('Subir archivos cer y key al formulario...');
-          await uploadFile(page, '#fileCertificate', filePathCer);
-          await uploadFile(page, '#filePrivateKey', filePathKey);
-
-          console.log('Escribir contraseña...');
-          await page.waitForSelector('#privateKeyPassword', { visible: true });
-          await page.type('#privateKeyPassword', password);
-
-          isFormValid = true;
-        }
+        captchaText = captcha.text;
+        isFormValid = captcha.isValid;
 
         if (isFormValid) {
-          console.log('Submit al formulario...');
-          await page.click('#submit');
+          await page.waitForSelector('#userCaptcha', { visible: true });
+          await page.type('#userCaptcha', captchaText);
+        }
+      } else if (loginMethod === 'efirma') {
+        // Activar la pestaña e.firma si es un tab (no fatal si ya está activa o no
+        // es clickeable). Análogo a lo que hace la Constancia con su propio botón.
+        try { await page.click('#btnCertificate'); } catch (e) { console.log('btnCertificate no clickeable (quizá ya activo):', e?.message); }
 
-          // Mismo timeout ajustable que el iframe de arriba: tras el submit la
-          // página de resultado (con el PDF en un iframe) también puede tardar si
-          // el SAT va lento; el default 30s de Puppeteer se quedaba corto.
-          console.log('Esperando al formulario...');
-          await page.waitForSelector('iframe', { timeout: Number(process.env.SAT_IFRAME_TIMEOUT_MS) || 45000 });
+        console.log('Subir archivos cer y key al formulario...');
+        await uploadFile(page, '#fileCertificate', filePathCer);
+        await uploadFile(page, '#filePrivateKey', filePathKey);
 
-          console.log('Obteniendo base64 de PDF...');
-          pdf = await page.evaluate(() => {
-            const iframe = document.querySelector('iframe');
-            return iframe?.src || '';
-          });
+        console.log('Escribir contraseña...');
+        await page.waitForSelector('#privateKeyPassword', { visible: true });
+        await page.type('#privateKeyPassword', password);
 
-          if (is.string(pdf) && pdf.includes('application/pdf')) {
-            status = true;
-            message = 'PDF de opinión de cumplimiento generado';
+        isFormValid = true;
+      }
 
+      if (isFormValid) {
+        console.log('Submit al formulario...');
+        await page.click('#submit');
+
+        console.log('Esperando al resultado...');
+        // Tras el login el SAT genera la opinión y la muestra dentro de un iframe.
+        await page.waitForSelector('iframe', { timeout: Number(process.env.SAT_IFRAME_TIMEOUT_MS) || 45000 });
+
+        console.log('Obteniendo base64 de PDF...');
+        // El PDF puede venir como src de un iframe/embed/object o como enlace, y
+        // como data:/blob:/URL. Buscamos en todos esos lugares; si no es ya un
+        // data: URI autocontenido, lo descargamos DENTRO de la página (cookies de
+        // sesión válidas) y lo convertimos a data URI.
+        let pdfRef = await page.evaluate(() => {
+          const looksPdf = (v) => !!v && (
+            v.startsWith('data:application/pdf') || v.startsWith('blob:') ||
+            /\.pdf(\?|#|$)/i.test(v) || v.includes('application/pdf')
+          );
+          for (const el of Array.from(document.querySelectorAll('iframe'))) { if (looksPdf(el.src)) return el.src; }
+          for (const el of Array.from(document.querySelectorAll('embed'))) { if (looksPdf(el.src)) return el.src; }
+          for (const el of Array.from(document.querySelectorAll('object'))) { if (looksPdf(el.data)) return el.data; }
+          for (const a of Array.from(document.querySelectorAll('a'))) { if (looksPdf(a.href)) return a.href; }
+          const f = document.querySelector('iframe');
+          return f ? f.src : '';
+        });
+
+        if (pdfRef && !pdfRef.startsWith('data:')) {
+          const conv = await page.evaluate(async (u) => {
             try {
-              const res = await fetch(pdf);
+              const res = await fetch(u, { credentials: 'include' });
               const blob = await res.blob();
-              const buffer = Buffer.from(await blob.arrayBuffer());
+              return await new Promise((resolve) => {
+                const r = new FileReader();
+                r.onloadend = () => resolve(r.result);
+                r.onerror = () => resolve('');
+                r.readAsDataURL(blob);
+              });
+            } catch (e) { return ''; }
+          }, pdfRef);
+          if (conv) pdfRef = conv;
+        }
+        pdf = pdfRef || '';
 
-              console.log('opinionCumplimentoInformacion');
-              info = await opinionCumplimentoInformacion(buffer);
-            } catch (er) {
-              console.log(er);
-            }
+        if (is.string(pdf) && pdf.includes('application/pdf')) {
+          status = true;
+          message = 'PDF de opinión de cumplimiento generado';
+
+          try {
+            const buffer = Buffer.from(String(pdf).replace(/^data:[^,]*,/, ''), 'base64');
+            console.log('opinionCumplimentoInformacion');
+            info = await opinionCumplimentoInformacion(buffer);
+          } catch (er) {
+            console.log(er);
           }
+        } else {
+          message = 'Login OK pero no se encontró el PDF de la opinión (revisar estructura del resultado del SAT).';
         }
       }
     } catch (e) {
-      const error = e?.message;
+      // Diagnóstico enriquecido: además del error, capturamos a DÓNDE quedó el
+      // navegador (url + título), para distinguir "URL de login equivocada /
+      // redirección inesperada" de "selector no encontrado" en un solo vistazo.
+      let diag = '';
+      try { if (page) diag = ` [url=${page.url()} | title=${await page.title()}]`; } catch (_) {}
+      const error = (e?.message || String(e)) + diag;
       console.log(error);
       message = error;
     }
